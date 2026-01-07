@@ -14,7 +14,10 @@ from notion_client import Client
 from github import Github
 
 # Load environment variables
-load_dotenv()
+# Get the directory where this script is located
+script_dir = Path(__file__).parent
+env_path = script_dir / '.env'
+load_dotenv(dotenv_path=env_path)
 
 class GitRepositoryScanner:
     """Scans for git repositories and gets today's commits"""
@@ -42,11 +45,17 @@ class GitRepositoryScanner:
             # Recursively search for git repos (limit depth to avoid too deep)
             try:
                 for item in path.rglob('.git'):
-                    repo_path = item.parent
-                    if repo_path not in repos:
-                        repos.append(repo_path)
+                    try:
+                        repo_path = item.parent
+                        if repo_path not in repos:
+                            repos.append(repo_path)
+                    except (OSError, PermissionError):
+                        # Skip inaccessible paths
+                        continue
             except (PermissionError, OSError) as e:
-                print(f"Warning: Could not scan {path}: {e}")
+                # Only print warning if it's a significant error
+                if "cannot find the path" not in str(e).lower():
+                    print(f"Warning: Could not scan {path}: {e}")
         
         return repos
     
@@ -138,7 +147,9 @@ class GitHubCommitTracker:
     """Fetches today's commits from GitHub"""
     
     def __init__(self, token: str, username: str):
-        self.github = Github(token)
+        from github import Auth
+        auth = Auth.Token(token)
+        self.github = Github(auth=auth)
         self.user = self.github.get_user(username)
         self.today = datetime.now().date()
     
@@ -184,6 +195,45 @@ class NotionJournal:
     def __init__(self, token: str, database_id: str):
         self.notion = Client(auth=token)
         self.database_id = database_id
+        self._title_property = None
+        self._date_property = None
+        self._get_database_schema()
+    
+    def _get_database_schema(self):
+        """Get database schema to find property names"""
+        try:
+            database = self.notion.databases.retrieve(database_id=self.database_id)
+            properties = database.get("properties", {})
+            
+            # Find title property (usually the first property or one named "Name", "Title", etc.)
+            for prop_name, prop_info in properties.items():
+                prop_type = prop_info.get("type")
+                if prop_type == "title":
+                    self._title_property = prop_name
+                    break
+            
+            # Find date property
+            for prop_name, prop_info in properties.items():
+                prop_type = prop_info.get("type")
+                if prop_type == "date":
+                    self._date_property = prop_name
+                    break
+            
+            # Fallback: use first property as title if no title found
+            if not self._title_property and properties:
+                self._title_property = list(properties.keys())[0]
+            
+            if not self._date_property:
+                # Try common date property names
+                for name in ["Date", "date", "Date Created", "Created"]:
+                    if name in properties and properties[name].get("type") == "date":
+                        self._date_property = name
+                        break
+        except Exception as e:
+            print(f"Warning: Could not get database schema: {e}")
+            # Use defaults
+            self._title_property = "Name"
+            self._date_property = "Date"
     
     def find_today_entry(self) -> Optional[Dict]:
         """Find today's journal entry if it exists"""
@@ -192,18 +242,21 @@ class NotionJournal:
         
         try:
             # Query database for today's entry
-            results = self.notion.databases.query(
-                database_id=self.database_id,
-                filter={
-                    "property": "Date",
-                    "date": {
-                        "equals": date_str
+            if self._date_property:
+                results = self.notion.databases.query(
+                    **{
+                        "database_id": self.database_id,
+                        "filter": {
+                            "property": self._date_property,
+                            "date": {
+                                "equals": date_str
+                            }
+                        }
                     }
-                }
-            )
-            
-            if results.get("results"):
-                return results["results"][0]
+                )
+                
+                if results.get("results"):
+                    return results["results"][0]
         except Exception as e:
             print(f"Error finding today's entry: {e}")
         
@@ -347,21 +400,30 @@ class NotionJournal:
         
         # Create the page
         try:
+            # Build properties based on schema
+            properties = {}
+            
+            # Add title property
+            if self._title_property:
+                properties[self._title_property] = {
+                    "title": [{"text": {"content": title}}]
+                }
+            
+            # Add date property
+            if self._date_property:
+                properties[self._date_property] = {
+                    "date": {"start": date_str}
+                }
+            
             new_page = self.notion.pages.create(
                 parent={"database_id": self.database_id},
-                properties={
-                    "Name": {
-                        "title": [{"text": {"content": title}}]
-                    },
-                    "Date": {
-                        "date": {"start": date_str}
-                    }
-                },
+                properties=properties,
                 children=children
             )
             return new_page
         except Exception as e:
             print(f"Error creating journal entry: {e}")
+            print(f"Title property: {self._title_property}, Date property: {self._date_property}")
             raise
     
     def update_journal_entry(self, page_id: str, local_commits: List[Dict], github_commits: List[Dict]):
@@ -418,12 +480,22 @@ def main():
     project_paths = [p.strip() for p in project_paths_str.split(",")]
     
     # Validate required config
-    if not notion_token:
-        print("Error: NOTION_TOKEN not found in .env file")
+    env_file = Path(__file__).parent / '.env'
+    if not env_file.exists():
+        print(f"Error: .env file not found at {env_file}")
+        print("Please create .env file from .env.example and add your credentials")
         sys.exit(1)
     
-    if not database_id:
-        print("Error: NOTION_DATABASE_ID not found in .env file")
+    if not notion_token:
+        print("Error: NOTION_TOKEN not found in .env file")
+        print(f"Please check your .env file at {env_file}")
+        print("Make sure NOTION_TOKEN is set (without quotes)")
+        sys.exit(1)
+    
+    if not database_id or database_id == "your_database_id_here":
+        print("Error: NOTION_DATABASE_ID not found or not configured in .env file")
+        print(f"Please check your .env file at {env_file}")
+        print("Get your Database ID from your Notion database URL")
         sys.exit(1)
     
     # Initialize components
@@ -453,11 +525,11 @@ def main():
     if existing_entry:
         print("   Found existing entry for today, updating...")
         journal.update_journal_entry(existing_entry['id'], local_commits, github_commits)
-        print(f"   ✓ Updated journal entry: {existing_entry.get('url', 'N/A')}")
+        print(f"   [OK] Updated journal entry: {existing_entry.get('url', 'N/A')}")
     else:
         print("   Creating new entry for today...")
         new_entry = journal.create_journal_entry(local_commits, github_commits)
-        print(f"   ✓ Created journal entry: {new_entry.get('url', 'N/A')}")
+        print(f"   [OK] Created journal entry: {new_entry.get('url', 'N/A')}")
     
     print("\n" + "=" * 60)
     print("Journal update complete!")
