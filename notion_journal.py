@@ -564,21 +564,23 @@ class NotionJournal:
         date_str = target_date.isoformat()
         
         try:
-            if self._date_property:
-                results = self.notion.databases.query(
-                    **{
-                        "database_id": self.database_id,
-                        "filter": {
-                            "property": self._date_property,
-                            "date": {
-                                "equals": date_str
-                            }
-                        }
-                    }
-                )
-                
-                if results.get("results"):
-                    return results["results"][0]
+            # Simple strategy: search by title "Journal - YYYY-MM-DD" and reuse first match
+            expected_title = f"Journal - {date_str}"
+
+            print(f"   [DEBUG] Searching for existing entry with title '{expected_title}'")
+
+            results = self.notion.search(
+                query=expected_title,
+                filter={"property": "object", "value": "page"},
+            )
+
+            pages = results.get("results", [])
+            print(f"   [DEBUG] Search returned {len(pages)} pages for '{expected_title}'")
+
+            if pages:
+                page = pages[0]
+                print(f"   [DEBUG] Reusing first matching page for {date_str}: {page.get('id')}")
+                return page
         except Exception as e:
             print(f"Error finding entry for {date_str}: {e}")
         
