@@ -183,12 +183,14 @@ class GitRepositoryScanner:
 class AIReportGenerator:
     """Generates AI-powered summaries and reports of daily work using local Ollama or OpenAI"""
     
-    def __init__(self, ollama_model: Optional[str] = None, openai_key: Optional[str] = None):
+    def __init__(self, ollama_model: Optional[str] = None, openai_key: Optional[str] = None, silent: bool = False):
+        # Store these for mood generation
         self.ollama_model = ollama_model or os.getenv("OLLAMA_MODEL", "llama3.2")
         self.openai_key = openai_key or os.getenv("OPENAI_API_KEY")
         self.use_ollama = os.getenv("USE_OLLAMA", "true").lower() == "true"
         self.ollama_available = False
         self.openai_client = None
+        self.silent = silent  # Don't print messages if True
         
         # Try to initialize Ollama (preferred, free, local)
         if self.use_ollama and OLLAMA_AVAILABLE:
@@ -196,19 +198,23 @@ class AIReportGenerator:
                 # Test if Ollama is running
                 ollama.list()
                 self.ollama_available = True
-                print(f"   [OK] Ollama initialized with model: {self.ollama_model}")
+                if not self.silent:
+                    print(f"   [OK] Ollama initialized with model: {self.ollama_model}")
             except Exception as e:
-                print(f"   [WARN] Ollama not available: {e}")
-                print(f"   [INFO] Install Ollama from https://ollama.com and run: ollama pull {self.ollama_model}")
+                if not self.silent:
+                    print(f"   [WARN] Ollama not available: {e}")
+                    print(f"   [INFO] Install Ollama from https://ollama.com and run: ollama pull {self.ollama_model}")
                 self.ollama_available = False
         
         # Fallback to OpenAI if Ollama not available and OpenAI key provided
         if not self.ollama_available and self.openai_key and OPENAI_AVAILABLE:
             try:
                 self.openai_client = OpenAI(api_key=self.openai_key)
-                print(f"   [OK] OpenAI initialized as fallback")
+                if not self.silent:
+                    print(f"   [OK] OpenAI initialized as fallback")
             except Exception as e:
-                print(f"   [WARN] Could not initialize OpenAI client: {e}")
+                if not self.silent:
+                    print(f"   [WARN] Could not initialize OpenAI client: {e}")
     
     def generate_daily_report(self, date: datetime.date, commits: List[Dict], github_commits: List[Dict]) -> str:
         """Generate an AI-powered daily work report"""
@@ -300,6 +306,83 @@ Write a comprehensive daily work report:"""
         summary += "The work involved various improvements and feature development across these repositories."
         
         return summary
+    
+    def generate_mood(self, date: datetime.date, commits: List[Dict], github_commits: List[Dict]) -> str:
+        """Generate a mood based on the work done"""
+        if not self.ollama_available and not self.openai_client:
+            # Fallback: simple mood based on commit count
+            total_commits = len(commits) + len(github_commits)
+            if total_commits == 0:
+                return "Neutral"
+            elif total_commits < 3:
+                return "Focused"
+            elif total_commits < 10:
+                return "Productive"
+            else:
+                return "Very Productive"
+        
+        # Use AI to generate mood
+        commit_summary = self._prepare_commit_summary(commits, github_commits)
+        
+        prompt = f"""Based on the following work activity for {date.strftime('%B %d, %Y')}, determine the mood/feeling of the work day.
+
+Work Activity:
+{commit_summary}
+
+Respond with ONLY a single word mood from this list: Productive, Focused, Challenging, Creative, Busy, Relaxed, Energetic, Satisfied, Frustrated, Excited, Neutral, Accomplished, Overwhelmed, Motivated, Tired, Inspired, Determined, Calm, Stressed, Happy
+
+Choose the ONE word that best describes the mood of this work day:"""
+
+        try:
+            if self.ollama_available:
+                response = ollama.chat(
+                    model=self.ollama_model,
+                    messages=[
+                        {"role": "system", "content": "You are a mood analyzer. Respond with only a single word."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    options={
+                        "temperature": 0.3,
+                        "num_predict": 20
+                    }
+                )
+                mood = response['message']['content'].strip().split()[0].capitalize()
+            elif self.openai_client:
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a mood analyzer. Respond with only a single word."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=10
+                )
+                mood = response.choices[0].message.content.strip().split()[0].capitalize()
+            else:
+                mood = "Productive"
+            
+            # Validate mood is from the list
+            valid_moods = ["Productive", "Focused", "Challenging", "Creative", "Busy", "Relaxed", 
+                          "Energetic", "Satisfied", "Frustrated", "Excited", "Neutral", "Accomplished", 
+                          "Overwhelmed", "Motivated", "Tired", "Inspired", "Determined", "Calm", 
+                          "Stressed", "Happy"]
+            
+            # Check if mood matches any valid mood (case-insensitive)
+            for valid in valid_moods:
+                if valid.lower() == mood.lower():
+                    return valid
+            
+            return "Productive"  # Default fallback
+        except Exception as e:
+            print(f"   [WARN] Mood generation failed: {e}")
+            # Fallback based on commit count
+            total_commits = len(commits) + len(github_commits)
+            if total_commits == 0:
+                return "Neutral"
+            elif total_commits < 3:
+                return "Focused"
+            else:
+                return "Productive"
 
 
 class GitHubCommitTracker:
@@ -354,8 +437,18 @@ class NotionJournal:
     def __init__(self, token: str, database_id: str):
         self.notion = Client(auth=token)
         self.database_id = database_id
+        # Explicit property names (can be overridden via .env if needed)
+        # These should match your Notion database column names exactly
+        self.title_prop_name = os.getenv("NOTION_TITLE_PROPERTY", "Title")
+        self.date_prop_name = os.getenv("NOTION_DATE_PROPERTY", "Date")
+        self.mood_prop_name = os.getenv("NOTION_MOOD_PROPERTY", "Mood")
+        self.content_prop_name = os.getenv("NOTION_CONTENT_PROPERTY", "Content")
+
         self._title_property = None
         self._date_property = None
+        self._mood_property = None
+        self._content_property = None
+        self._database_properties = {}
         self._get_database_schema()
     
     def _get_database_schema(self):
@@ -363,33 +456,78 @@ class NotionJournal:
         try:
             database = self.notion.databases.retrieve(database_id=self.database_id)
             properties = database.get("properties", {})
+            self._database_properties = properties
+            
+            # Debug: Print all properties found
+            print(f"\n   [DEBUG] Found {len(properties)} properties in database:")
+            for prop_name, prop_info in properties.items():
+                prop_type = prop_info.get("type")
+                print(f"      - {prop_name} ({prop_type})")
             
             # Find title property (usually the first property or one named "Name", "Title", etc.)
             for prop_name, prop_info in properties.items():
                 prop_type = prop_info.get("type")
                 if prop_type == "title":
                     self._title_property = prop_name
+                    print(f"   [DEBUG] Found title property: {prop_name}")
                     break
             
-            # Find date property
+            # Find date property - case insensitive search
             for prop_name, prop_info in properties.items():
                 prop_type = prop_info.get("type")
                 if prop_type == "date":
-                    self._date_property = prop_name
+                    # Prefer exact match "Date" over other date properties
+                    if prop_name.lower() == "date":
+                        self._date_property = prop_name
+                        print(f"   [DEBUG] Found date property: {prop_name}")
+                        break
+            
+            # If no exact "Date" match, find any date property
+            if not self._date_property:
+                for prop_name, prop_info in properties.items():
+                    prop_type = prop_info.get("type")
+                    if prop_type == "date":
+                        self._date_property = prop_name
+                        print(f"   [DEBUG] Found date property (fallback): {prop_name}")
+                        break
+            
+            # Find mood property - case insensitive, any type
+            for prop_name, prop_info in properties.items():
+                if prop_name.lower() == "mood":
+                    self._mood_property = prop_name
+                    mood_type = prop_info.get("type")
+                    print(f"   [DEBUG] Found mood property: {prop_name} (type: {mood_type})")
                     break
+            
+            # Find content property - case insensitive
+            for prop_name, prop_info in properties.items():
+                if prop_name.lower() == "content":
+                    prop_type = prop_info.get("type")
+                    # Accept any text-like type
+                    if prop_type in ["rich_text", "text"]:
+                        self._content_property = prop_name
+                        print(f"   [DEBUG] Found content property: {prop_name} (type: {prop_type})")
+                        break
             
             # Fallback: use first property as title if no title found
             if not self._title_property and properties:
                 self._title_property = list(properties.keys())[0]
+                print(f"   [DEBUG] Using first property as title: {self._title_property}")
             
             if not self._date_property:
-                # Try common date property names
-                for name in ["Date", "date", "Date Created", "Created"]:
-                    if name in properties and properties[name].get("type") == "date":
-                        self._date_property = name
+                # Try common date property names (case insensitive)
+                for prop_name, prop_info in properties.items():
+                    if prop_name.lower() in ["date", "date created", "created"] and prop_info.get("type") == "date":
+                        self._date_property = prop_name
+                        print(f"   [DEBUG] Found date property (by name match): {prop_name}")
                         break
+            
+            print(f"   [DEBUG] Detected properties - Title: {self._title_property}, Date: {self._date_property}, Mood: {self._mood_property}, Content: {self._content_property}")
+            print(f"   [DEBUG] Using explicit names - Title: {self.title_prop_name}, Date: {self.date_prop_name}, Mood: {self.mood_prop_name}, Content: {self.content_prop_name}")
         except Exception as e:
             print(f"Warning: Could not get database schema: {e}")
+            import traceback
+            traceback.print_exc()
             # Use defaults
             self._title_property = "Name"
             self._date_property = "Date"
@@ -614,25 +752,129 @@ class NotionJournal:
             # Build properties based on schema
             properties = {}
             
-            # Add title property
-            if self._title_property:
-                properties[self._title_property] = {
+            # Add title property (use explicit name, fallback to detected)
+            title_prop = self.title_prop_name or self._title_property
+            if title_prop:
+                properties[title_prop] = {
                     "title": [{"text": {"content": title}}]
                 }
+                print(f"   [DEBUG] Setting title property '{title_prop}' = '{title}'")
+            else:
+                print(f"   [WARN] Title property not found!")
             
-            # Add date property
-            if self._date_property:
-                properties[self._date_property] = {
+            # Add date property (use explicit name, fallback to detected)
+            date_prop = self.date_prop_name or self._date_property
+            if date_prop:
+                properties[date_prop] = {
                     "date": {"start": date_str}
                 }
+                print(f"   [DEBUG] Setting date property '{date_prop}' = '{date_str}'")
+            else:
+                print(f"   [WARN] Date property not found!")
+            
+            # Add mood property (use explicit name)
+            if self.mood_prop_name:
+                mood_prop_name = self.mood_prop_name
+                mood_prop_info = self._database_properties.get(mood_prop_name, {})
+                if not mood_prop_info:
+                    print(f"   [WARN] Mood property '{mood_prop_name}' not found in database schema")
+                    mood_type = None
+                else:
+                    mood_type = mood_prop_info.get("type")
+                
+                print(f"   [DEBUG] Setting mood property '{mood_prop_name}' (type: {mood_type})")
+                
+                # Generate mood using AI (create generator instance, silent mode)
+                ai_gen = AIReportGenerator(ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2"), 
+                                          openai_key=os.getenv("OPENAI_API_KEY"),
+                                          silent=True)
+                mood = ai_gen.generate_mood(date, local_commits, github_commits)
+                print(f"   [DEBUG] Generated mood: {mood}")
+                
+                if mood_type == "select":
+                    # For select type, try to match mood to available options
+                    options = mood_prop_info.get("select", {}).get("options", [])
+                    print(f"   [DEBUG] Select options available: {[opt.get('name') for opt in options]}")
+                    mood_lower = mood.lower()
+                    
+                    # Try exact match first
+                    matched = False
+                    for opt in options:
+                        if opt.get("name", "").lower() == mood_lower:
+                            properties[mood_prop_name] = {"select": {"name": opt.get("name")}}
+                            print(f"   [DEBUG] Matched mood to option: {opt.get('name')}")
+                            matched = True
+                            break
+                    
+                    # Try partial match
+                    if not matched:
+                        for opt in options:
+                            if mood_lower in opt.get("name", "").lower() or opt.get("name", "").lower() in mood_lower:
+                                properties[mood_prop_name] = {"select": {"name": opt.get("name")}}
+                                print(f"   [DEBUG] Partial matched mood to option: {opt.get('name')}")
+                                matched = True
+                                break
+                    
+                    # Use first option if no match
+                    if not matched and options:
+                        properties[mood_prop_name] = {"select": {"name": options[0].get("name")}}
+                        print(f"   [DEBUG] Using first option as fallback: {options[0].get('name')}")
+                elif mood_type == "rich_text":
+                    properties[mood_prop_name] = {
+                        "rich_text": [{"text": {"content": mood}}]
+                    }
+                    print(f"   [DEBUG] Set mood as rich_text: {mood}")
+                elif mood_type == "text":
+                    properties[mood_prop_name] = {
+                        "text": [{"text": {"content": mood}}]
+                    }
+                    print(f"   [DEBUG] Set mood as text: {mood}")
+                else:
+                    print(f"   [WARN] Unknown mood property type: {mood_type}")
+            else:
+                print(f"   [WARN] Mood property name not configured (expected 'Mood')!")
+            
+            # Add content property (use AI report, explicit name)
+            if self.content_prop_name:
+                content_prop_name = self.content_prop_name
+                content_prop_info = self._database_properties.get(content_prop_name, {})
+                if not content_prop_info:
+                    print(f"   [WARN] Content property '{content_prop_name}' not found in database schema")
+                    content_type = "rich_text"
+                else:
+                    content_type = content_prop_info.get("type")
+                
+                print(f"   [DEBUG] Setting content property '{content_prop_name}' (type: {content_type})")
+                
+                # Use AI report as content (first 2000 chars to avoid limits)
+                content_text = ai_report[:2000] if len(ai_report) > 2000 else ai_report
+                
+                if content_type == "rich_text":
+                    # For rich_text, use simple format
+                    properties[content_prop_name] = {
+                        "rich_text": [{"text": {"content": content_text}}]
+                    }
+                    print(f"   [DEBUG] Set content as rich_text ({len(content_text)} chars)")
+                elif content_type == "text":
+                    properties[content_prop_name] = {
+                        "text": [{"text": {"content": content_text}}]
+                    }
+                    print(f"   [DEBUG] Set content as text ({len(content_text)} chars)")
+                else:
+                    print(f"   [WARN] Unknown content property type: {content_type}, trying rich_text")
+                    properties[content_prop_name] = {
+                        "rich_text": [{"text": {"content": content_text}}]
+                    }
+            else:
+                print(f"   [WARN] Content property name not configured (expected 'Content')!")
+            
+            # Debug: Print all properties being set
+            print(f"   [DEBUG] Properties to set: {list(properties.keys())}")
             
             # Try to populate other common properties
             try:
-                database = self.notion.databases.retrieve(database_id=self.database_id)
-                db_properties = database.get("properties", {})
-                
                 # Try to add commit count if property exists
-                for prop_name, prop_info in db_properties.items():
+                for prop_name, prop_info in self._database_properties.items():
                     prop_type = prop_info.get("type")
                     if prop_type == "number" and ("commit" in prop_name.lower() or "count" in prop_name.lower()):
                         properties[prop_name] = {"number": total_commits}
@@ -644,15 +886,21 @@ class NotionJournal:
             except:
                 pass  # Ignore errors when trying to populate additional properties
             
+            print(f"   [DEBUG] Creating page with {len(properties)} properties")
             new_page = self.notion.pages.create(
                 parent={"database_id": self.database_id},
                 properties=properties,
                 children=children
             )
+            print(f"   [DEBUG] Page created successfully")
             return new_page
         except Exception as e:
             print(f"Error creating journal entry: {e}")
             print(f"Title property: {self._title_property}, Date property: {self._date_property}")
+            print(f"Mood property: {self._mood_property}, Content property: {self._content_property}")
+            print(f"Properties dict: {properties}")
+            import traceback
+            traceback.print_exc()
             raise
     
     def update_journal_entry(self, page_id: str, date: datetime.date, local_commits: List[Dict], github_commits: List[Dict], ai_report: str):
