@@ -1,0 +1,11 @@
+name: notion-journal
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - notion-client>=2.2.1
+    - PyGithub>=2.1.1
+    - python-dotenv>=1.0.0
