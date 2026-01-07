@@ -5,9 +5,11 @@ Automatically track your daily Cursor activity and GitHub commits, then create/u
 ## Features
 
 - 🔍 **Scans Local Git Repositories**: Automatically finds and scans all git repositories in your project directories
-- 📊 **Tracks Daily Commits**: Collects all commits made today from local repos
+- 📊 **Tracks Commits by Date**: Collects commits from the past N days and groups them by date
 - 🌐 **GitHub Integration**: Fetches commits from your GitHub account
-- 📝 **Notion Journal**: Creates or updates a daily journal entry in Notion
+- 🤖 **AI-Generated Reports**: Uses Ollama (free, local) to generate insightful daily work summaries and analysis
+- 📝 **Notion Journal**: Creates or updates journal entries in Notion for each day with work
+- 📈 **Comprehensive Reports**: Each entry includes AI analysis, statistics, and detailed commit logs
 - ⏰ **Automated**: Runs daily via Windows Task Scheduler or WSL cron
 
 ## Setup
@@ -46,7 +48,21 @@ conda activate notion-journal
 3. Select scope: `public_repo` (or `repo` for private repos)
 4. Copy the token (starts with `ghp_`)
 
-### 5. Configure the Script
+### 5. Configure Ollama (Recommended, Free & Local AI)
+
+1. **Install Ollama**: Download from https://ollama.com
+2. **Download a model**: Open terminal and run:
+   ```bash
+   ollama pull llama3.2
+   ```
+   (Other good options: `llama3.1`, `mistral`, `phi3`)
+3. **Verify it works**: 
+   ```bash
+   ollama list
+   ```
+4. **Note**: Ollama runs completely locally and is 100% free. No API keys needed!
+
+### 6. Configure the Script
 
 1. Copy `.env.example` to `.env`:
    ```bash
@@ -59,15 +75,23 @@ conda activate notion-journal
    NOTION_DATABASE_ID=your_actual_database_id_here
    GITHUB_TOKEN=ghp_your_github_token_here
    GITHUB_USERNAME=your_github_username
+   USE_OLLAMA=true
+   OLLAMA_MODEL=llama3.2
    PROJECT_PATHS=d:\projects
+   DAYS_BACK=7
    ```
+   
+   **Note**: 
+   - `USE_OLLAMA=true` enables free local AI (recommended)
+   - `OLLAMA_MODEL` is the model name you downloaded (default: `llama3.2`)
+   - OpenAI is optional fallback - only add `OPENAI_API_KEY` if you want to use it instead
 
    **Note**: For multiple project paths, separate with commas:
    ```env
    PROJECT_PATHS=d:\projects,c:\dev,/mnt/d/projects
    ```
 
-### 6. Test the Script
+### 7. Test the Script
 
 ```bash
 conda activate notion-journal
@@ -119,27 +143,42 @@ python notion_journal.py
 
 The script tracks:
 
-- **Local Git Commits**: All commits made today in your project directories
+- **Local Git Commits**: All commits from the past N days (default: 7) in your project directories
   - Commit hash, message, author, date
   - Files changed
   - Repository name
+  - Grouped by date
 
-- **GitHub Commits**: Commits pushed to GitHub today
+- **GitHub Commits**: Commits pushed to GitHub in the date range
   - Commit hash, message, repository
   - Links to commits on GitHub
+  - Grouped by date
+
+- **AI-Generated Daily Reports**: For each day with commits, generates (using free local Ollama):
+  - High-level summary of accomplishments
+  - Main projects and areas of focus
+  - Key technical work and improvements
+  - Patterns and themes in the work
 
 - **Summary Statistics**:
-  - Total commits
+  - Total commits per day
   - Number of repositories worked on
+  - Files changed count
 
 ## Journal Entry Structure
 
 Each journal entry includes:
 
-1. **Daily Summary**: Total commits and repositories
-2. **Local Commits**: Organized by repository
-3. **GitHub Commits**: With links to GitHub
-4. **Notes Section**: For manual notes and reflections
+1. **📝 Daily Work Report**: AI-generated comprehensive analysis of the day's work
+2. **📊 Activity Statistics**: Total commits, repositories, and files changed
+3. **💻 Detailed Commit Log**: All commits organized by repository with details
+4. **🌐 GitHub Commits**: With links to commits on GitHub
+
+The AI report provides insights into:
+- What was accomplished
+- Main projects and focus areas
+- Key technical work and improvements
+- Patterns in your development workflow
 
 ## Troubleshooting
 
