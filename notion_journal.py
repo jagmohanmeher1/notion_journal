@@ -586,168 +586,52 @@ class NotionJournal:
         
         return None
     
+    def get_commit_count_from_page(self, page_id: str) -> Optional[int]:
+        """
+        Inspect an existing Notion page and try to read the 'Total commits: X'
+        bullet from its content. Returns the integer count if found, otherwise None.
+        """
+        try:
+            all_blocks = []
+            cursor = None
+            while True:
+                kwargs = {"block_id": page_id}
+                if cursor:
+                    kwargs["start_cursor"] = cursor
+                resp = self.notion.blocks.children.list(**kwargs)
+                blocks = resp.get("results", [])
+                all_blocks.extend(blocks)
+                cursor = resp.get("next_cursor")
+                if not resp.get("has_more"):
+                    break
+            
+            for block in all_blocks:
+                if block.get("type") == "bulleted_list_item":
+                    rich = block.get("bulleted_list_item", {}).get("rich_text", [])
+                    text_content = "".join(t.get("plain_text", "") for t in rich)
+                    if text_content.lower().startswith("total commits:"):
+                        try:
+                            # After "Total commits:" parse the integer
+                            after_colon = text_content.split(":", 1)[1].strip()
+                            num_str = "".join(ch for ch in after_colon if (ch.isdigit() or ch == "-")).split("-")[0]
+                            if num_str:
+                                return int(num_str)
+                        except Exception:
+                            continue
+        except Exception as e:
+            print(f"   [WARN] Could not read commit count from page {page_id}: {e}")
+        
+        return None
+    
     def create_journal_entry(self, date: datetime.date, local_commits: List[Dict], github_commits: List[Dict], ai_report: str) -> Dict:
         """Create a new journal entry with activity for a specific date"""
         date_str = date.strftime("%Y-%m-%d")
         title = f"Journal - {date_str}"
         
-        # Organize commits by repository
-        repos_dict = {}
-        for commit in local_commits:
-            repo_name = commit['repo']
-            if repo_name not in repos_dict:
-                repos_dict[repo_name] = []
-            repos_dict[repo_name].append(commit)
-        
-        # Build content blocks
-        children = []
-        
-        # AI-Generated Daily Report (main content)
-        children.append({
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {
-                "rich_text": [{"type": "text", "text": {"content": "📝 Daily Work Report"}}]
-            }
-        })
-        
-        # Split AI report into paragraphs
-        report_paragraphs = ai_report.split('\n\n')
-        for para in report_paragraphs:
-            if para.strip():
-                children.append({
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": para.strip()}}]
-                    }
-                })
-        
-        # Statistics section
-        children.append({
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {
-                "rich_text": [{"type": "text", "text": {"content": "📊 Activity Statistics"}}]
-            }
-        })
+        # Build content blocks using shared helper
+        children = self._build_entry_children(date, local_commits, github_commits, ai_report)
         
         total_commits = len(local_commits) + len(github_commits)
-        repos_worked = len(repos_dict) + len(set(c.get('repo', 'Unknown') for c in github_commits))
-        total_files = sum(len(c.get('files', [])) for c in local_commits + github_commits)
-        
-        children.append({
-            "object": "block",
-            "type": "bulleted_list_item",
-            "bulleted_list_item": {
-                "rich_text": [{"type": "text", "text": {"content": f"Total commits: {total_commits}"}}]
-            }
-        })
-        
-        children.append({
-            "object": "block",
-            "type": "bulleted_list_item",
-            "bulleted_list_item": {
-                "rich_text": [{"type": "text", "text": {"content": f"Repositories worked on: {repos_worked}"}}]
-            }
-        })
-        
-        if total_files > 0:
-            children.append({
-                "object": "block",
-                "type": "bulleted_list_item",
-                "bulleted_list_item": {
-                    "rich_text": [{"type": "text", "text": {"content": f"Files changed: {total_files}"}}]
-                }
-            })
-        
-        # Local commits section
-        if local_commits:
-            children.append({
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {
-                    "rich_text": [{"type": "text", "text": {"content": "💻 Local Commits"}}]
-                }
-            })
-            
-            for repo_name, commits in repos_dict.items():
-                children.append({
-                    "object": "block",
-                    "type": "heading_3",
-                    "heading_3": {
-                        "rich_text": [{"type": "text", "text": {"content": f"📁 {repo_name}"}}]
-                    }
-                })
-                
-                for commit in commits:
-                    commit_text = f"{commit['hash']}: {commit['message']}"
-                    if commit['files']:
-                        commit_text += f" ({len(commit['files'])} files)"
-                    
-                    children.append({
-                        "object": "block",
-                        "type": "bulleted_list_item",
-                        "bulleted_list_item": {
-                            "rich_text": [{"type": "text", "text": {"content": commit_text}}]
-                        }
-                    })
-        
-        # GitHub commits section
-        if github_commits:
-            children.append({
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {
-                    "rich_text": [{"type": "text", "text": {"content": "🌐 GitHub Commits"}}]
-                }
-            })
-            
-            github_repos = {}
-            for commit in github_commits:
-                repo_name = commit['repo']
-                if repo_name not in github_repos:
-                    github_repos[repo_name] = []
-                github_repos[repo_name].append(commit)
-            
-            for repo_name, commits in github_repos.items():
-                children.append({
-                    "object": "block",
-                    "type": "heading_3",
-                    "heading_3": {
-                        "rich_text": [{"type": "text", "text": {"content": f"📁 {repo_name}"}}]
-                    }
-                })
-                
-                for commit in commits:
-                    # Include GitHub URL directly in the text instead of using an invalid 'annotations.link' field
-                    commit_text = f"{commit['hash']}: {commit['message']}"
-                    url = commit.get('url')
-                    if url:
-                        commit_text += f" ({url})"
-                    
-                    children.append({
-                        "object": "block",
-                        "type": "bulleted_list_item",
-                        "bulleted_list_item": {
-                            "rich_text": [
-                                {
-                                    "type": "text",
-                                    "text": {"content": commit_text}
-                                }
-                            ]
-                        }
-                    })
-        
-        # Detailed Commit Log section
-        if local_commits or github_commits:
-            children.append({
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {
-                    "rich_text": [{"type": "text", "text": {"content": "💻 Detailed Commit Log"}}]
-                }
-            })
         
         # Create the page
         try:
@@ -905,39 +789,259 @@ class NotionJournal:
             traceback.print_exc()
             raise
     
+    def _build_entry_children(self, date: datetime.date, local_commits: List[Dict], github_commits: List[Dict], ai_report: str) -> List[Dict]:
+        """Build the content blocks for a journal entry (shared by create and update)"""
+        # Organize commits by repository
+        repos_dict = {}
+        for commit in local_commits:
+            repo_name = commit['repo']
+            if repo_name not in repos_dict:
+                repos_dict[repo_name] = []
+            repos_dict[repo_name].append(commit)
+        
+        # Build content blocks
+        children = []
+        
+        # AI-Generated Daily Report (main content)
+        children.append({
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [{"type": "text", "text": {"content": "📝 Daily Work Report"}}]
+            }
+        })
+        
+        # Split AI report into paragraphs
+        report_paragraphs = ai_report.split('\n\n')
+        for para in report_paragraphs:
+            if para.strip():
+                children.append({
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [{"type": "text", "text": {"content": para.strip()}}]
+                    }
+                })
+        
+        # Statistics section
+        children.append({
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [{"type": "text", "text": {"content": "📊 Activity Statistics"}}]
+            }
+        })
+        
+        total_commits = len(local_commits) + len(github_commits)
+        repos_worked = len(repos_dict) + len(set(c.get('repo', 'Unknown') for c in github_commits))
+        total_files = sum(len(c.get('files', [])) for c in local_commits + github_commits)
+        
+        children.append({
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [{"type": "text", "text": {"content": f"Total commits: {total_commits}"}}]
+            }
+        })
+        
+        children.append({
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [{"type": "text", "text": {"content": f"Repositories worked on: {repos_worked}"}}]
+            }
+        })
+        
+        if total_files > 0:
+            children.append({
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {
+                    "rich_text": [{"type": "text", "text": {"content": f"Files changed: {total_files}"}}]
+                }
+            })
+        
+        # Local commits section
+        if local_commits:
+            children.append({
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": "💻 Local Commits"}}]
+                }
+            })
+            
+            for repo_name, commits in repos_dict.items():
+                children.append({
+                    "object": "block",
+                    "type": "heading_3",
+                    "heading_3": {
+                        "rich_text": [{"type": "text", "text": {"content": f"📁 {repo_name}"}}]
+                    }
+                })
+                
+                for commit in commits:
+                    commit_text = f"{commit['hash']}: {commit['message']}"
+                    if commit['files']:
+                        commit_text += f" ({len(commit['files'])} files)"
+                    
+                    children.append({
+                        "object": "block",
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": {
+                            "rich_text": [{"type": "text", "text": {"content": commit_text}}]
+                        }
+                    })
+        
+        # GitHub commits section
+        if github_commits:
+            children.append({
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": "🌐 GitHub Commits"}}]
+                }
+            })
+            
+            github_repos = {}
+            for commit in github_commits:
+                repo_name = commit['repo']
+                if repo_name not in github_repos:
+                    github_repos[repo_name] = []
+                github_repos[repo_name].append(commit)
+            
+            for repo_name, commits in github_repos.items():
+                children.append({
+                    "object": "block",
+                    "type": "heading_3",
+                    "heading_3": {
+                        "rich_text": [{"type": "text", "text": {"content": f"📁 {repo_name}"}}]
+                    }
+                })
+                
+                for commit in commits:
+                    # Include GitHub URL directly in the text instead of using an invalid 'annotations.link' field
+                    commit_text = f"{commit['hash']}: {commit['message']}"
+                    url = commit.get('url')
+                    if url:
+                        commit_text += f" ({url})"
+                    
+                    children.append({
+                        "object": "block",
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": {
+                            "rich_text": [
+                                {
+                                    "type": "text",
+                                    "text": {"content": commit_text}
+                                }
+                            ]
+                        }
+                    })
+        
+        return children
+    
     def update_journal_entry(self, page_id: str, date: datetime.date, local_commits: List[Dict], github_commits: List[Dict], ai_report: str):
-        """Update existing journal entry with new commits and regenerate AI report"""
-        # For now, we'll recreate the entry with updated content
-        # In a more sophisticated version, we could merge and deduplicate
+        """Update existing journal entry by completely rebuilding it with latest commits"""
+        date_str = date.strftime("%Y-%m-%d")
+        title = f"Journal - {date_str}"
         
         try:
-            # Get existing page
-            page = self.notion.pages.retrieve(page_id=page_id)
+            # Build properties (same as create)
+            properties = {}
+            total_commits = len(local_commits) + len(github_commits)
             
-            # Delete all existing blocks and recreate
-            try:
-                blocks = self.notion.blocks.children.list(block_id=page_id)
-                for block in blocks.get("results", []):
-                    try:
-                        self.notion.blocks.delete(block_id=block["id"])
-                    except:
-                        pass
-            except:
-                pass
-            
-            # Recreate with new content (reuse create_journal_entry logic)
-            # For simplicity, we'll just append a note about the update
-            new_children = [{
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [{"type": "text", "text": {"content": f"Updated on {datetime.now().strftime('%Y-%m-%d %H:%M')} with {len(local_commits) + len(github_commits)} commits"}}]
+            # Update title property
+            title_prop = self.title_prop_name or self._title_property
+            if title_prop:
+                properties[title_prop] = {
+                    "title": [{"text": {"content": title}}]
                 }
-            }]
             
-            self.notion.blocks.children.append(block_id=page_id, children=new_children)
+            # Update date property
+            date_prop = self.date_prop_name or self._date_property
+            if date_prop:
+                properties[date_prop] = {
+                    "date": {"start": date_str}
+                }
+            
+            # Update mood property
+            if self.mood_prop_name:
+                mood_prop_name = self.mood_prop_name
+                mood_prop_info = self._database_properties.get(mood_prop_name, {})
+                mood_type = mood_prop_info.get("type") if mood_prop_info else None
+                
+                if mood_type:
+                    # Generate mood using AI
+                    ai_gen = AIReportGenerator(ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2"), 
+                                              openai_key=os.getenv("OPENAI_API_KEY"),
+                                              silent=True)
+                    mood = ai_gen.generate_mood(date, local_commits, github_commits)
+                    
+                    if mood_type == "select":
+                        options = mood_prop_info.get("select", {}).get("options", [])
+                        mood_lower = mood.lower()
+                        matched = False
+                        for opt in options:
+                            if opt.get("name", "").lower() == mood_lower:
+                                properties[mood_prop_name] = {"select": {"name": opt.get("name")}}
+                                matched = True
+                                break
+                        if not matched and options:
+                            properties[mood_prop_name] = {"select": {"name": options[0].get("name")}}
+                    elif mood_type == "rich_text":
+                        properties[mood_prop_name] = {
+                            "rich_text": [{"text": {"content": mood}}]
+                        }
+                    elif mood_type == "text":
+                        properties[mood_prop_name] = {
+                            "text": [{"text": {"content": mood}}]
+                        }
+            
+            # Update content property
+            if self.content_prop_name:
+                content_prop_name = self.content_prop_name
+                content_text = ai_report[:2000] if len(ai_report) > 2000 else ai_report
+                properties[content_prop_name] = {
+                    "rich_text": [{"text": {"content": content_text}}]
+                }
+            
+            # Update page properties
+            if properties:
+                self.notion.pages.update(page_id=page_id, properties=properties)
+            
+            # Delete all existing blocks
+            try:
+                cursor = None
+                while True:
+                    kwargs = {"block_id": page_id}
+                    if cursor:
+                        kwargs["start_cursor"] = cursor
+                    resp = self.notion.blocks.children.list(**kwargs)
+                    blocks = resp.get("results", [])
+                    for block in blocks:
+                        try:
+                            self.notion.blocks.delete(block_id=block["id"])
+                        except Exception:
+                            pass
+                    cursor = resp.get("next_cursor")
+                    if not resp.get("has_more"):
+                        break
+            except Exception as e:
+                print(f"   [WARN] Error deleting old blocks: {e}")
+            
+            # Rebuild all content blocks with latest commits
+            new_children = self._build_entry_children(date, local_commits, github_commits, ai_report)
+            
+            # Add all new content
+            if new_children:
+                self.notion.blocks.children.append(block_id=page_id, children=new_children)
+            
+            print(f"   [DEBUG] Updated entry with {total_commits} commits")
         except Exception as e:
             print(f"Error updating journal entry: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 def main():
@@ -1065,14 +1169,21 @@ def main():
         
         # Generate AI report
         ai_report = ai_generator.generate_daily_report(date, local_commits, github_commits)
+        new_total_commits = len(local_commits) + len(github_commits)
         
         # Check if entry exists
         existing_entry = journal.find_entry_by_date(date)
         
         if existing_entry:
-            print(f"      Found existing entry, updating...")
-            journal.update_journal_entry(existing_entry['id'], date, local_commits, github_commits, ai_report)
-            print(f"      [OK] Updated: {existing_entry.get('url', 'N/A')}")
+            page_id = existing_entry['id']
+            print(f"      Found existing entry, checking commit count before updating...")
+            existing_count = journal.get_commit_count_from_page(page_id)
+            if existing_count is not None and existing_count == new_total_commits:
+                print(f"      Commit count unchanged ({existing_count}), skipping update")
+            else:
+                print(f"      Commit count changed (existing={existing_count}, new={new_total_commits}), updating...")
+                journal.update_journal_entry(page_id, date, local_commits, github_commits, ai_report)
+                print(f"      [OK] Updated: {existing_entry.get('url', 'N/A')}")
         else:
             print(f"      Creating new entry...")
             new_entry = journal.create_journal_entry(date, local_commits, github_commits, ai_report)
